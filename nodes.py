@@ -1,57 +1,109 @@
+"""
+ComfyUI 核心节点定义文件
+包含所有内置节点的实现，是ComfyUI的核心组件
+
+主要功能：
+1. 定义所有内置节点类
+2. 提供节点注册和映射机制
+3. 实现自定义节点加载系统
+4. 管理节点显示名称和分类
+
+文件结构：
+- 导入必要的库和模块
+- 定义工具函数
+- 实现各种节点类
+- 提供节点注册和加载机制
+"""
+
 from __future__ import annotations
-import torch
+import torch  # PyTorch深度学习框架
 
+# 标准库导入
+import os      # 文件系统操作
+import sys     # 系统相关功能
+import json    # JSON数据处理
+import hashlib # 哈希算法
+import inspect # 代码检查
+import traceback # 错误追踪
+import math    # 数学运算
+import time    # 时间处理
+import random  # 随机数生成
+import logging # 日志记录
 
-import os
-import sys
-import json
-import hashlib
-import inspect
-import traceback
-import math
-import time
-import random
-import logging
+# 图像处理库
+from PIL import Image, ImageOps, ImageSequence  # PIL图像处理
+from PIL.PngImagePlugin import PngInfo          # PNG元数据处理
 
-from PIL import Image, ImageOps, ImageSequence
-from PIL.PngImagePlugin import PngInfo
+# 数值计算库
+import numpy as np           # 数值计算
+import safetensors.torch    # 安全张量存储
 
-import numpy as np
-import safetensors.torch
-
+# 添加comfy模块到Python路径
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "comfy"))
 
-import comfy.diffusers_load
-import comfy.samplers
-import comfy.sample
-import comfy.sd
-import comfy.utils
-import comfy.controlnet
-from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator
-from comfy_api.internal import register_versions, ComfyAPIWithVersion
-from comfy_api.version_list import supported_versions
-from comfy_api.latest import io, ComfyExtension
+# 导入ComfyUI核心模块
+import comfy.diffusers_load  # Diffusers模型加载
+import comfy.samplers        # 采样器实现
+import comfy.sample          # 采样核心功能
+import comfy.sd             # Stable Diffusion核心
+import comfy.utils          # 工具函数
+import comfy.controlnet     # ControlNet支持
+from comfy.comfy_types import IO, ComfyNodeABC, InputTypeDict, FileLocator  # 类型定义
+from comfy_api.internal import register_versions, ComfyAPIWithVersion      # API版本管理
+from comfy_api.version_list import supported_versions                      # 支持的API版本
+from comfy_api.latest import io, ComfyExtension                            # 最新API接口
 
-import comfy.clip_vision
+import comfy.clip_vision     # CLIP视觉模型
 
-import comfy.model_management
-from comfy.cli_args import args
+import comfy.model_management  # 模型管理
+from comfy.cli_args import args  # 命令行参数
 
-import importlib
+import importlib  # 动态模块导入
 
-import folder_paths
-import latent_preview
-import node_helpers
+# ComfyUI工具模块
+import folder_paths    # 文件夹路径管理
+import latent_preview  # 潜在空间预览
+import node_helpers    # 节点辅助函数
+
+# =============================================================================
+# 工具函数定义
+# =============================================================================
 
 def before_node_execution():
+    """
+    节点执行前的检查函数
+    检查是否有处理中断信号，如果有则抛出异常
+    """
     comfy.model_management.throw_exception_if_processing_interrupted()
 
 def interrupt_processing(value=True):
+    """
+    中断当前处理流程
+    
+    参数:
+        value (bool): True表示中断处理，False表示取消中断
+    """
     comfy.model_management.interrupt_current_processing(value)
 
+# 最大分辨率限制常量
 MAX_RESOLUTION=16384
 
+# =============================================================================
+# 条件处理节点 (Conditioning Nodes)
+# =============================================================================
+
 class CLIPTextEncode(ComfyNodeABC):
+    """
+    CLIP文本编码节点
+    功能：将文本提示词编码为条件向量，用于指导扩散模型生成图像
+    
+    输入：
+        - text: 要编码的文本提示词
+        - clip: CLIP模型实例
+    
+    输出：
+        - conditioning: 包含编码文本的条件向量
+    """
     @classmethod
     def INPUT_TYPES(s) -> InputTypeDict:
         return {
@@ -68,13 +120,34 @@ class CLIPTextEncode(ComfyNodeABC):
     DESCRIPTION = "Encodes a text prompt using a CLIP model into an embedding that can be used to guide the diffusion model towards generating specific images."
 
     def encode(self, clip, text):
+        """
+        执行文本编码
+        
+        参数:
+            clip: CLIP模型实例
+            text: 要编码的文本
+            
+        返回:
+            tuple: 包含编码条件的元组
+        """
         if clip is None:
             raise RuntimeError("ERROR: clip input is invalid: None\n\nIf the clip is from a checkpoint loader node your checkpoint does not contain a valid clip or text encoder model.")
-        tokens = clip.tokenize(text)
-        return (clip.encode_from_tokens_scheduled(tokens), )
+        tokens = clip.tokenize(text)  # 将文本分词
+        return (clip.encode_from_tokens_scheduled(tokens), )  # 编码分词后的文本
 
 
 class ConditioningCombine:
+    """
+    条件组合节点
+    功能：将两个条件向量列表合并为一个
+    
+    输入：
+        - conditioning_1: 第一个条件向量列表
+        - conditioning_2: 第二个条件向量列表
+    
+    输出：
+        - conditioning: 合并后的条件向量列表
+    """
     @classmethod
     def INPUT_TYPES(s):
         return {"required": {"conditioning_1": ("CONDITIONING", ), "conditioning_2": ("CONDITIONING", )}}
@@ -84,7 +157,17 @@ class ConditioningCombine:
     CATEGORY = "conditioning"
 
     def combine(self, conditioning_1, conditioning_2):
-        return (conditioning_1 + conditioning_2, )
+        """
+        合并两个条件向量列表
+        
+        参数:
+            conditioning_1: 第一个条件向量列表
+            conditioning_2: 第二个条件向量列表
+            
+        返回:
+            tuple: 合并后的条件向量列表
+        """
+        return (conditioning_1 + conditioning_2, )  # 简单列表拼接
 
 class ConditioningAverage :
     @classmethod
@@ -275,7 +358,22 @@ class ConditioningSetTimestepRange:
                                                                 "end_percent": end})
         return (c, )
 
+# =============================================================================
+# 潜在空间处理节点 (Latent Space Nodes)
+# =============================================================================
+
 class VAEDecode:
+    """
+    VAE解码节点
+    功能：将潜在空间图像解码为像素空间图像
+    
+    输入：
+        - samples: 潜在空间图像数据
+        - vae: VAE模型实例
+    
+    输出：
+        - image: 解码后的像素图像
+    """
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -292,8 +390,18 @@ class VAEDecode:
     DESCRIPTION = "Decodes latent images back into pixel space images."
 
     def decode(self, vae, samples):
-        images = vae.decode(samples["samples"])
-        if len(images.shape) == 5: #Combine batches
+        """
+        执行VAE解码
+        
+        参数:
+            vae: VAE模型实例
+            samples: 潜在空间图像数据
+            
+        返回:
+            tuple: 解码后的图像
+        """
+        images = vae.decode(samples["samples"])  # 使用VAE解码潜在空间
+        if len(images.shape) == 5: # 合并批次维度
             images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
         return (images, )
 
@@ -556,7 +664,23 @@ class CheckpointLoader:
         ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
         return comfy.sd.load_checkpoint(config_path, ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
 
+# =============================================================================
+# 模型加载节点 (Model Loader Nodes)
+# =============================================================================
+
 class CheckpointLoaderSimple:
+    """
+    简单检查点加载节点
+    功能：加载Stable Diffusion检查点文件，包含模型、CLIP和VAE组件
+    
+    输入：
+        - ckpt_name: 检查点文件名
+    
+    输出：
+        - model: 扩散模型（用于去噪）
+        - clip: CLIP模型（用于文本编码）
+        - vae: VAE模型（用于图像编码/解码）
+    """
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -574,9 +698,18 @@ class CheckpointLoaderSimple:
     DESCRIPTION = "Loads a diffusion model checkpoint, diffusion models are used to denoise latents."
 
     def load_checkpoint(self, ckpt_name):
-        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)
+        """
+        加载检查点文件
+        
+        参数:
+            ckpt_name: 检查点文件名
+            
+        返回:
+            tuple: 包含(model, clip, vae)的元组
+        """
+        ckpt_path = folder_paths.get_full_path_or_raise("checkpoints", ckpt_name)  # 获取检查点完整路径
         out = comfy.sd.load_checkpoint_guess_config(ckpt_path, output_vae=True, output_clip=True, embedding_directory=folder_paths.get_folder_paths("embeddings"))
-        return out[:3]
+        return out[:3]  # 返回前三个组件：模型、CLIP、VAE
 
 class DiffusersLoader:
     @classmethod
@@ -1496,7 +1629,30 @@ def common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, 
     out["samples"] = samples
     return (out, )
 
+# =============================================================================
+# 采样节点 (Sampling Nodes)
+# =============================================================================
+
 class KSampler:
+    """
+    K采样器节点
+    功能：使用扩散模型对潜在空间图像进行去噪采样，生成最终图像
+    
+    输入：
+        - model: 扩散模型
+        - seed: 随机种子
+        - steps: 采样步数
+        - cfg: 分类器自由引导强度
+        - sampler_name: 采样算法名称
+        - scheduler: 噪声调度器
+        - positive: 正向条件（想要的特征）
+        - negative: 负向条件（不想要的特征）
+        - latent_image: 潜在空间图像
+        - denoise: 去噪强度
+    
+    输出：
+        - latent: 去噪后的潜在空间图像
+    """
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -1522,6 +1678,24 @@ class KSampler:
     DESCRIPTION = "Uses the provided model, positive and negative conditioning to denoise the latent image."
 
     def sample(self, model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=1.0):
+        """
+        执行采样过程
+        
+        参数:
+            model: 扩散模型
+            seed: 随机种子
+            steps: 采样步数
+            cfg: 分类器自由引导强度
+            sampler_name: 采样算法名称
+            scheduler: 噪声调度器
+            positive: 正向条件
+            negative: 负向条件
+            latent_image: 潜在空间图像
+            denoise: 去噪强度
+            
+        返回:
+            tuple: 去噪后的潜在空间图像
+        """
         return common_ksampler(model, seed, steps, cfg, sampler_name, scheduler, positive, negative, latent_image, denoise=denoise)
 
 class KSamplerAdvanced:
@@ -1627,14 +1801,29 @@ class PreviewImage(SaveImage):
                 "hidden": {"prompt": "PROMPT", "extra_pnginfo": "EXTRA_PNGINFO"},
                 }
 
+# =============================================================================
+# 图像处理节点 (Image Processing Nodes)
+# =============================================================================
+
 class LoadImage:
+    """
+    图像加载节点
+    功能：从文件系统加载图像文件，支持多种格式和透明度处理
+    
+    输入：
+        - image: 图像文件名（从输入目录选择）
+    
+    输出：
+        - image: 加载的图像张量
+        - mask: 图像的透明度遮罩
+    """
     @classmethod
     def INPUT_TYPES(s):
-        input_dir = folder_paths.get_input_directory()
-        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]
-        files = folder_paths.filter_files_content_types(files, ["image"])
+        input_dir = folder_paths.get_input_directory()  # 获取输入目录
+        files = [f for f in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, f))]  # 列出所有文件
+        files = folder_paths.filter_files_content_types(files, ["image"])  # 过滤出图像文件
         return {"required":
-                    {"image": (sorted(files), {"image_upload": True})},
+                    {"image": (sorted(files), {"image_upload": True})},  # 支持文件选择和上传
                 }
 
     CATEGORY = "image"
@@ -1642,45 +1831,62 @@ class LoadImage:
     RETURN_TYPES = ("IMAGE", "MASK")
     FUNCTION = "load_image"
     def load_image(self, image):
-        image_path = folder_paths.get_annotated_filepath(image)
+        """
+        加载图像文件
+        
+        参数:
+            image: 图像文件名
+            
+        返回:
+            tuple: (图像张量, 遮罩张量)
+        """
+        image_path = folder_paths.get_annotated_filepath(image)  # 获取图像完整路径
 
-        img = node_helpers.pillow(Image.open, image_path)
+        img = node_helpers.pillow(Image.open, image_path)  # 使用PIL打开图像
 
-        output_images = []
-        output_masks = []
-        w, h = None, None
+        output_images = []  # 存储处理后的图像
+        output_masks = []   # 存储透明度遮罩
+        w, h = None, None   # 图像尺寸
 
-        excluded_formats = ['MPO']
+        excluded_formats = ['MPO']  # 排除的格式
 
+        # 遍历图像序列（支持GIF等多帧图像）
         for i in ImageSequence.Iterator(img):
-            i = node_helpers.pillow(ImageOps.exif_transpose, i)
+            i = node_helpers.pillow(ImageOps.exif_transpose, i)  # 处理EXIF方向信息
 
-            if i.mode == 'I':
+            if i.mode == 'I':  # 处理16位灰度图像
                 i = i.point(lambda i: i * (1 / 255))
-            image = i.convert("RGB")
+            image = i.convert("RGB")  # 转换为RGB格式
 
+            # 记录第一张图像的尺寸
             if len(output_images) == 0:
                 w = image.size[0]
                 h = image.size[1]
 
+            # 跳过尺寸不匹配的图像
             if image.size[0] != w or image.size[1] != h:
                 continue
 
+            # 转换为numpy数组并归一化
             image = np.array(image).astype(np.float32) / 255.0
-            image = torch.from_numpy(image)[None,]
-            if 'A' in i.getbands():
+            image = torch.from_numpy(image)[None,]  # 添加批次维度
+            
+            # 处理透明度遮罩
+            if 'A' in i.getbands():  # 如果有Alpha通道
                 mask = np.array(i.getchannel('A')).astype(np.float32) / 255.0
-                mask = 1. - torch.from_numpy(mask)
-            elif i.mode == 'P' and 'transparency' in i.info:
+                mask = 1. - torch.from_numpy(mask)  # 反转遮罩
+            elif i.mode == 'P' and 'transparency' in i.info:  # 调色板模式下的透明度
                 mask = np.array(i.convert('RGBA').getchannel('A')).astype(np.float32) / 255.0
                 mask = 1. - torch.from_numpy(mask)
             else:
-                mask = torch.zeros((64,64), dtype=torch.float32, device="cpu")
+                mask = torch.zeros((64,64), dtype=torch.float32, device="cpu")  # 默认无遮罩
+            
             output_images.append(image)
             output_masks.append(mask.unsqueeze(0))
 
+        # 处理多帧图像
         if len(output_images) > 1 and img.format not in excluded_formats:
-            output_image = torch.cat(output_images, dim=0)
+            output_image = torch.cat(output_images, dim=0)  # 拼接多帧图像
             output_mask = torch.cat(output_masks, dim=0)
         else:
             output_image = output_images[0]
@@ -1943,81 +2149,100 @@ class ImagePadForOutpaint:
         return (new_image, mask.unsqueeze(0))
 
 
+# =============================================================================
+# 节点注册系统 (Node Registration System)
+# =============================================================================
+
+# 节点类映射字典
+# 将节点名称映射到对应的节点类，ComfyUI通过这个字典来识别和加载节点
 NODE_CLASS_MAPPINGS = {
+    # 采样节点
     "KSampler": KSampler,
+    "KSamplerAdvanced": KSamplerAdvanced,
+    
+    # 模型加载节点
     "CheckpointLoaderSimple": CheckpointLoaderSimple,
+    "CheckpointLoader": CheckpointLoader,
+    "DiffusersLoader": DiffusersLoader,
+    "unCLIPCheckpointLoader": unCLIPCheckpointLoader,
+    "VAELoader": VAELoader,
+    "LoraLoader": LoraLoader,
+    "LoraLoaderModelOnly": LoraLoaderModelOnly,
+    "CLIPLoader": CLIPLoader,
+    "DualCLIPLoader": DualCLIPLoader,
+    "UNETLoader": UNETLoader,
+    "ControlNetLoader": ControlNetLoader,
+    "DiffControlNetLoader": DiffControlNetLoader,
+    "StyleModelLoader": StyleModelLoader,
+    "CLIPVisionLoader": CLIPVisionLoader,
+    "GLIGENLoader": GLIGENLoader,
+    
+    # 条件处理节点
     "CLIPTextEncode": CLIPTextEncode,
     "CLIPSetLastLayer": CLIPSetLastLayer,
-    "VAEDecode": VAEDecode,
-    "VAEEncode": VAEEncode,
-    "VAEEncodeForInpaint": VAEEncodeForInpaint,
-    "VAELoader": VAELoader,
-    "EmptyLatentImage": EmptyLatentImage,
-    "LatentUpscale": LatentUpscale,
-    "LatentUpscaleBy": LatentUpscaleBy,
-    "LatentFromBatch": LatentFromBatch,
-    "RepeatLatentBatch": RepeatLatentBatch,
-    "SaveImage": SaveImage,
-    "PreviewImage": PreviewImage,
-    "LoadImage": LoadImage,
-    "LoadImageMask": LoadImageMask,
-    "LoadImageOutput": LoadImageOutput,
-    "ImageScale": ImageScale,
-    "ImageScaleBy": ImageScaleBy,
-    "ImageInvert": ImageInvert,
-    "ImageBatch": ImageBatch,
-    "ImagePadForOutpaint": ImagePadForOutpaint,
-    "EmptyImage": EmptyImage,
-    "ConditioningAverage": ConditioningAverage ,
+    "CLIPVisionEncode": CLIPVisionEncode,
+    "StyleModelApply": StyleModelApply,
+    "unCLIPConditioning": unCLIPConditioning,
+    "ConditioningAverage": ConditioningAverage,
     "ConditioningCombine": ConditioningCombine,
     "ConditioningConcat": ConditioningConcat,
     "ConditioningSetArea": ConditioningSetArea,
     "ConditioningSetAreaPercentage": ConditioningSetAreaPercentage,
     "ConditioningSetAreaStrength": ConditioningSetAreaStrength,
     "ConditioningSetMask": ConditioningSetMask,
-    "KSamplerAdvanced": KSamplerAdvanced,
+    "ConditioningZeroOut": ConditioningZeroOut,
+    "ConditioningSetTimestepRange": ConditioningSetTimestepRange,
+    
+    # ControlNet节点
+    "ControlNetApply": ControlNetApply,
+    "ControlNetApplyAdvanced": ControlNetApplyAdvanced,
+    
+    # 潜在空间处理节点
+    "VAEDecode": VAEDecode,
+    "VAEEncode": VAEEncode,
+    "VAEEncodeForInpaint": VAEEncodeForInpaint,
+    "VAEDecodeTiled": VAEDecodeTiled,
+    "VAEEncodeTiled": VAEEncodeTiled,
+    "EmptyLatentImage": EmptyLatentImage,
+    "LatentUpscale": LatentUpscale,
+    "LatentUpscaleBy": LatentUpscaleBy,
+    "LatentFromBatch": LatentFromBatch,
+    "RepeatLatentBatch": RepeatLatentBatch,
     "SetLatentNoiseMask": SetLatentNoiseMask,
     "LatentComposite": LatentComposite,
     "LatentBlend": LatentBlend,
     "LatentRotate": LatentRotate,
     "LatentFlip": LatentFlip,
     "LatentCrop": LatentCrop,
-    "LoraLoader": LoraLoader,
-    "CLIPLoader": CLIPLoader,
-    "UNETLoader": UNETLoader,
-    "DualCLIPLoader": DualCLIPLoader,
-    "CLIPVisionEncode": CLIPVisionEncode,
-    "StyleModelApply": StyleModelApply,
-    "unCLIPConditioning": unCLIPConditioning,
-    "ControlNetApply": ControlNetApply,
-    "ControlNetApplyAdvanced": ControlNetApplyAdvanced,
-    "ControlNetLoader": ControlNetLoader,
-    "DiffControlNetLoader": DiffControlNetLoader,
-    "StyleModelLoader": StyleModelLoader,
-    "CLIPVisionLoader": CLIPVisionLoader,
-    "VAEDecodeTiled": VAEDecodeTiled,
-    "VAEEncodeTiled": VAEEncodeTiled,
-    "unCLIPCheckpointLoader": unCLIPCheckpointLoader,
-    "GLIGENLoader": GLIGENLoader,
-    "GLIGENTextBoxApply": GLIGENTextBoxApply,
-    "InpaintModelConditioning": InpaintModelConditioning,
-
-    "CheckpointLoader": CheckpointLoader,
-    "DiffusersLoader": DiffusersLoader,
-
     "LoadLatent": LoadLatent,
     "SaveLatent": SaveLatent,
-
-    "ConditioningZeroOut": ConditioningZeroOut,
-    "ConditioningSetTimestepRange": ConditioningSetTimestepRange,
-    "LoraLoaderModelOnly": LoraLoaderModelOnly,
+    
+    # 图像处理节点
+    "LoadImage": LoadImage,
+    "LoadImageMask": LoadImageMask,
+    "LoadImageOutput": LoadImageOutput,
+    "SaveImage": SaveImage,
+    "PreviewImage": PreviewImage,
+    "ImageScale": ImageScale,
+    "ImageScaleBy": ImageScaleBy,
+    "ImageInvert": ImageInvert,
+    "ImageBatch": ImageBatch,
+    "ImagePadForOutpaint": ImagePadForOutpaint,
+    "EmptyImage": EmptyImage,
+    
+    # 特殊功能节点
+    "GLIGENTextBoxApply": GLIGENTextBoxApply,
+    "InpaintModelConditioning": InpaintModelConditioning,
 }
 
+# 节点显示名称映射字典
+# 定义节点在ComfyUI界面中显示的名称，支持多语言和自定义显示
 NODE_DISPLAY_NAME_MAPPINGS = {
-    # Sampling
+    # 采样节点
     "KSampler": "KSampler",
     "KSamplerAdvanced": "KSampler (Advanced)",
-    # Loaders
+    
+    # 模型加载节点
     "CheckpointLoader": "Load Checkpoint With Config (DEPRECATED)",
     "CheckpointLoaderSimple": "Load Checkpoint",
     "VAELoader": "Load VAE",
@@ -2028,7 +2253,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "StyleModelLoader": "Load Style Model",
     "CLIPVisionLoader": "Load CLIP Vision",
     "UNETLoader": "Load Diffusion Model",
-    # Conditioning
+    
+    # 条件处理节点
     "CLIPVisionEncode": "CLIP Vision Encode",
     "StyleModelApply": "Apply Style Model",
     "CLIPTextEncode": "CLIP Text Encode (Prompt)",
@@ -2041,7 +2267,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ConditioningSetMask": "Conditioning (Set Mask)",
     "ControlNetApply": "Apply ControlNet (OLD)",
     "ControlNetApplyAdvanced": "Apply ControlNet",
-    # Latent
+    
+    # 潜在空间处理节点
     "VAEEncodeForInpaint": "VAE Encode (for Inpainting)",
     "SetLatentNoiseMask": "Set Latent Noise Mask",
     "VAEDecode": "VAE Decode",
@@ -2056,7 +2283,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "LatentBlend": "Latent Blend",
     "LatentFromBatch" : "Latent From Batch",
     "RepeatLatentBatch": "Repeat Latent Batch",
-    # Image
+    
+    # 图像处理节点
     "SaveImage": "Save Image",
     "PreviewImage": "Preview Image",
     "LoadImage": "Load Image",
@@ -2075,50 +2303,81 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ImageSharpen": "Image Sharpen",
     "ImageScaleToTotalPixels": "Scale Image to Total Pixels",
     "GetImageSize": "Get Image Size",
-    # _for_testing
+    
+    # 测试节点
     "VAEDecodeTiled": "VAE Decode (Tiled)",
     "VAEEncodeTiled": "VAE Encode (Tiled)",
 }
 
+# =============================================================================
+# 自定义节点加载系统 (Custom Node Loading System)
+# =============================================================================
+
+# 扩展Web目录映射
+# 存储自定义节点的Web资源目录路径
 EXTENSION_WEB_DIRS = {}
 
-# Dictionary of successfully loaded module names and associated directories.
+# 已加载模块目录映射
+# 存储成功加载的模块名称和对应的目录路径
 LOADED_MODULE_DIRS = {}
 
 
 def get_module_name(module_path: str) -> str:
     """
-    Returns the module name based on the given module path.
-    Examples:
+    根据模块路径获取模块名称
+    
+    功能：
+        从文件路径中提取模块名称，处理各种路径格式
+    
+    示例：
         get_module_name("C:/Users/username/ComfyUI/custom_nodes/my_custom_node.py") -> "my_custom_node"
         get_module_name("C:/Users/username/ComfyUI/custom_nodes/my_custom_node") -> "my_custom_node"
         get_module_name("C:/Users/username/ComfyUI/custom_nodes/my_custom_node/") -> "my_custom_node"
         get_module_name("C:/Users/username/ComfyUI/custom_nodes/my_custom_node/__init__.py") -> "my_custom_node"
         get_module_name("C:/Users/username/ComfyUI/custom_nodes/my_custom_node/__init__") -> "my_custom_node"
         get_module_name("C:/Users/username/ComfyUI/custom_nodes/my_custom_node/__init__/") -> "my_custom_node"
-        get_module_name("C:/Users/username/ComfyUI/custom_nodes/my_custom_node.disabled") -> "custom_nodes
-    Args:
-        module_path (str): The path of the module.
-    Returns:
-        str: The module name.
+        get_module_name("C:/Users/username/ComfyUI/custom_nodes/my_custom_node.disabled") -> "custom_nodes"
+    
+    参数:
+        module_path (str): 模块路径
+        
+    返回:
+        str: 模块名称
     """
-    base_path = os.path.basename(module_path)
-    if os.path.isfile(module_path):
+    base_path = os.path.basename(module_path)  # 获取路径的最后一部分
+    if os.path.isfile(module_path):  # 如果是文件，去掉扩展名
         base_path = os.path.splitext(base_path)[0]
     return base_path
 
 
 async def load_custom_node(module_path: str, ignore=set(), module_parent="custom_nodes") -> bool:
-    module_name = get_module_name(module_path)
-    if os.path.isfile(module_path):
+    """
+    加载自定义节点模块
+    
+    功能：
+        动态加载自定义节点模块，支持V1和V3两种节点定义格式
+        处理模块导入、Web资源注册、节点注册等
+    
+    参数:
+        module_path (str): 模块路径
+        ignore (set): 要忽略的节点名称集合
+        module_parent (str): 模块父级名称
+        
+    返回:
+        bool: 加载是否成功
+    """
+    module_name = get_module_name(module_path)  # 获取模块名称
+    if os.path.isfile(module_path):  # 处理文件路径
         sp = os.path.splitext(module_path)
         module_name = sp[0]
         sys_module_name = module_name
-    elif os.path.isdir(module_path):
+    elif os.path.isdir(module_path):  # 处理目录路径
         sys_module_name = module_path.replace(".", "_x_")
 
     try:
         logging.debug("Trying to load custom node {}".format(module_path))
+        
+        # 创建模块规范
         if os.path.isfile(module_path):
             module_spec = importlib.util.spec_from_file_location(sys_module_name, module_path)
             module_dir = os.path.split(module_path)[0]
@@ -2126,12 +2385,15 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
             module_spec = importlib.util.spec_from_file_location(sys_module_name, os.path.join(module_path, "__init__.py"))
             module_dir = module_path
 
+        # 创建并执行模块
         module = importlib.util.module_from_spec(module_spec)
         sys.modules[sys_module_name] = module
         module_spec.loader.exec_module(module)
 
+        # 记录已加载的模块目录
         LOADED_MODULE_DIRS[module_name] = os.path.abspath(module_dir)
 
+        # 尝试解析pyproject.toml配置
         try:
             from comfy_config import config_parser
 
@@ -2151,27 +2413,30 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
         except Exception as e:
             logging.warning(f"Unable to parse pyproject.toml due to lack dependency pydantic-settings, please run 'pip install -r requirements.txt': {e}")
 
+        # 处理Web目录
         if hasattr(module, "WEB_DIRECTORY") and getattr(module, "WEB_DIRECTORY") is not None:
             web_dir = os.path.abspath(os.path.join(module_dir, getattr(module, "WEB_DIRECTORY")))
             if os.path.isdir(web_dir):
                 EXTENSION_WEB_DIRS[module_name] = web_dir
 
-        # V1 node definition
+        # V1节点定义格式
         if hasattr(module, "NODE_CLASS_MAPPINGS") and getattr(module, "NODE_CLASS_MAPPINGS") is not None:
             for name, node_cls in module.NODE_CLASS_MAPPINGS.items():
                 if name not in ignore:
-                    NODE_CLASS_MAPPINGS[name] = node_cls
+                    NODE_CLASS_MAPPINGS[name] = node_cls  # 注册节点类
                     node_cls.RELATIVE_PYTHON_MODULE = "{}.{}".format(module_parent, get_module_name(module_path))
             if hasattr(module, "NODE_DISPLAY_NAME_MAPPINGS") and getattr(module, "NODE_DISPLAY_NAME_MAPPINGS") is not None:
-                NODE_DISPLAY_NAME_MAPPINGS.update(module.NODE_DISPLAY_NAME_MAPPINGS)
+                NODE_DISPLAY_NAME_MAPPINGS.update(module.NODE_DISPLAY_NAME_MAPPINGS)  # 更新显示名称
             return True
-        # V3 Extension Definition
+            
+        # V3扩展定义格式
         elif hasattr(module, "comfy_entrypoint"):
             entrypoint = getattr(module, "comfy_entrypoint")
             if not callable(entrypoint):
                 logging.warning(f"comfy_entrypoint in {module_path} is not callable, skipping.")
                 return False
             try:
+                # 调用入口点函数
                 if inspect.iscoroutinefunction(entrypoint):
                     extension = await entrypoint()
                 else:
@@ -2183,6 +2448,7 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
                 if not isinstance(node_list, list):
                     logging.warning(f"comfy_entrypoint in {module_path} did not return a list of nodes, skipping.")
                     return False
+                # 注册V3格式的节点
                 for node_cls in node_list:
                     node_cls: io.ComfyNode
                     schema = node_cls.GET_SCHEMA()
@@ -2205,33 +2471,43 @@ async def load_custom_node(module_path: str, ignore=set(), module_parent="custom
 
 async def init_external_custom_nodes():
     """
-    Initializes the external custom nodes.
-
-    This function loads custom nodes from the specified folder paths and imports them into the application.
-    It measures the import times for each custom node and logs the results.
-
-    Returns:
+    初始化外部自定义节点
+    
+    功能：
+        从指定的文件夹路径加载自定义节点并导入到应用程序中
+        测量每个自定义节点的导入时间并记录结果
+        支持禁用和白名单机制
+    
+    返回:
         None
     """
-    base_node_names = set(NODE_CLASS_MAPPINGS.keys())
-    node_paths = folder_paths.get_folder_paths("custom_nodes")
-    node_import_times = []
+    base_node_names = set(NODE_CLASS_MAPPINGS.keys())  # 获取基础节点名称集合
+    node_paths = folder_paths.get_folder_paths("custom_nodes")  # 获取自定义节点路径
+    node_import_times = []  # 存储导入时间信息
+    
+    # 遍历所有自定义节点路径
     for custom_node_path in node_paths:
-        possible_modules = os.listdir(os.path.realpath(custom_node_path))
+        possible_modules = os.listdir(os.path.realpath(custom_node_path))  # 列出目录内容
         if "__pycache__" in possible_modules:
-            possible_modules.remove("__pycache__")
+            possible_modules.remove("__pycache__")  # 移除缓存目录
 
+        # 遍历可能的模块
         for possible_module in possible_modules:
             module_path = os.path.join(custom_node_path, possible_module)
-            if os.path.isfile(module_path) and os.path.splitext(module_path)[1] != ".py": continue
-            if module_path.endswith(".disabled"): continue
+            if os.path.isfile(module_path) and os.path.splitext(module_path)[1] != ".py": 
+                continue  # 跳过非Python文件
+            if module_path.endswith(".disabled"): 
+                continue  # 跳过禁用的模块
             if args.disable_all_custom_nodes and possible_module not in args.whitelist_custom_nodes:
                 logging.info(f"Skipping {possible_module} due to disable_all_custom_nodes and whitelist_custom_nodes")
-                continue
+                continue  # 根据禁用和白名单设置跳过模块
+            
+            # 测量导入时间
             time_before = time.perf_counter()
             success = await load_custom_node(module_path, base_node_names, module_parent="custom_nodes")
             node_import_times.append((time.perf_counter() - time_before, module_path, success))
 
+    # 记录导入时间统计
     if len(node_import_times) > 0:
         logging.info("\nImport times for custom nodes:")
         for n in sorted(node_import_times):
@@ -2383,19 +2659,34 @@ async def init_public_apis():
     ])
 
 async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
-    await init_public_apis()
+    """
+    初始化所有额外节点
+    
+    功能：
+        初始化ComfyUI的所有额外节点，包括内置扩展节点、API节点和自定义节点
+        处理导入失败的情况并提供解决建议
+    
+    参数:
+        init_custom_nodes (bool): 是否初始化自定义节点
+        init_api_nodes (bool): 是否初始化API节点
+        
+    返回:
+        list: 导入失败的节点列表
+    """
+    await init_public_apis()  # 初始化公共API
 
-    import_failed = await init_builtin_extra_nodes()
+    import_failed = await init_builtin_extra_nodes()  # 初始化内置扩展节点
 
     import_failed_api = []
     if init_api_nodes:
-        import_failed_api = await init_builtin_api_nodes()
+        import_failed_api = await init_builtin_api_nodes()  # 初始化API节点
 
     if init_custom_nodes:
-        await init_external_custom_nodes()
+        await init_external_custom_nodes()  # 初始化外部自定义节点
     else:
         logging.info("Skipping loading of custom nodes")
 
+    # 处理API节点导入失败
     if len(import_failed_api) > 0:
         logging.warning("WARNING: some comfy_api_nodes/ nodes did not import correctly. This may be because they are missing some dependencies.\n")
         for node in import_failed_api:
@@ -2407,6 +2698,7 @@ async def init_extra_nodes(init_custom_nodes=True, init_api_nodes=True):
             logging.warning("Please do a: pip install -r requirements.txt")
         logging.warning("")
 
+    # 处理扩展节点导入失败
     if len(import_failed) > 0:
         logging.warning("WARNING: some comfy_extras/ nodes did not import correctly. This may be because they are missing some dependencies.\n")
         for node in import_failed:
